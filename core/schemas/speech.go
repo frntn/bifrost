@@ -26,6 +26,15 @@ type BifrostSpeechResponse struct {
 	ExtraFields         BifrostResponseExtraFields `json:"extra_fields"`
 }
 
+func (r *BifrostSpeechResponse) BackfillParams(request *BifrostSpeechRequest) {
+	if r.Usage == nil {
+		r.Usage = &SpeechUsage{}
+	}
+	if request.Input != nil {
+		r.Usage.InputChars = len(request.Input.Input)
+	}
+}
+
 // SpeechAlignment represents character-level timing information for audio-text synchronization
 type SpeechAlignment struct {
 	CharStartTimesMs []float64 `json:"char_start_times_ms"` // Start time in milliseconds for each character
@@ -141,6 +150,7 @@ type SpeechUsageInputTokenDetails struct {
 }
 type SpeechUsage struct {
 	InputTokens       int                           `json:"input_tokens"`
+	InputChars        int                           `json:"input_chars,omitempty"`
 	InputTokenDetails *SpeechUsageInputTokenDetails `json:"input_token_details,omitempty"`
 	OutputTokens      int                           `json:"output_tokens"`
 	TotalTokens       int                           `json:"total_tokens"`
