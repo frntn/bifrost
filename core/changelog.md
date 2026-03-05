@@ -1,0 +1,1 @@
+- feat: add DisableAutoToolInject to MCPToolManagerConfig to suppress automatic MCP tool injection per request
