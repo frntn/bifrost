@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/bytedance/sonic"
 	"github.com/google/uuid"
 
 	"github.com/maximhq/bifrost/core/mcp"
@@ -81,6 +82,7 @@ type Bifrost struct {
 	mcpInitOnce         sync.Once                           // Ensures MCP manager is initialized only once
 	dropExcessRequests  atomic.Bool                         // If true, in cases where the queue is full, requests will not wait for the queue to be empty and will be dropped instead.
 	keySelector         schemas.KeySelector                 // Custom key selector function
+	kvStore             schemas.KVStore                     // optional KV store for session stickiness (nil = disabled)
 }
 
 // ProviderQueue wraps a provider's request channel with lifecycle management
@@ -200,6 +202,7 @@ func Init(ctx context.Context, config schemas.BifrostConfig) (*Bifrost, error) {
 		keySelector:    config.KeySelector,
 		oauth2Provider: config.OAuth2Provider,
 		logger:         config.Logger,
+		kvStore:        config.KVStore,
 	}
 	bifrost.tracer.Store(&tracerWrapper{tracer: tracer})
 	if config.LLMPlugins == nil {
@@ -6066,13 +6069,69 @@ func (bifrost *Bifrost) selectKeyFromProviderForModel(ctx *schemas.BifrostContex
 		return supportedKeys[0], nil
 	}
 
+	// Session stickiness: on the first request for a session ID, the randomly
+	// selected key is persisted in the KV store. Subsequent requests reuse it as
+	// long as the key remains valid. On retries the sticky lookup is skipped so a
+	// transient failure on one key does not loop indefinitely.
+	sessionID := ""
+	if ctx != nil {
+		if id, ok := ctx.Value(schemas.BifrostContextKeySessionID).(string); ok && id != "" {
+			sessionID = id
+		}
+	}
+
+	retries, _ := ctx.Value(schemas.BifrostContextKeyNumberOfRetries).(int)
+	stickinessActive := sessionID != "" && bifrost.kvStore != nil && retries == 0
+
+	if stickinessActive {
+		kvKey := buildSessionKey(providerKey, sessionID)
+		ttl, _ := ctx.Value(schemas.BifrostContextKeySessionTTL).(time.Duration)
+		if ttl <= 0 {
+			ttl = schemas.DefaultSessionStickyTTL
+		}
+
+		if raw, err := bifrost.kvStore.Get(kvKey); err == nil {
+			var cachedKeyID string
+			switch v := raw.(type) {
+			case string:
+				cachedKeyID = v
+			case []byte:
+				_ = sonic.Unmarshal(v, &cachedKeyID)
+			}
+
+			if cachedKeyID != "" {
+				for _, k := range supportedKeys {
+					if k.ID == cachedKeyID {
+						// Refresh TTL so active sessions do not expire.
+						err := bifrost.kvStore.SetWithTTL(kvKey, cachedKeyID, ttl)
+						if err != nil {
+							bifrost.logger.Warn("error setting session cache for session=%s provider=%s key_id=%s: %s", sessionID, providerKey, cachedKeyID, err.Error())
+						}
+						return k, nil
+					}
+				}
+				// Cached key is no longer in supportedKeys (disabled / removed /
+				// model support changed) — fall through to re-select and overwrite.
+			}
+		}
+
+		selectedKey, err := bifrost.keySelector(ctx, supportedKeys, providerKey, model)
+		if err != nil {
+			return schemas.Key{}, err
+		}
+		err = bifrost.kvStore.SetWithTTL(kvKey, selectedKey.ID, ttl)
+		if err != nil {
+			bifrost.logger.Warn("error setting session cache for session=%s provider=%s key_id=%s: %s", sessionID, providerKey, selectedKey.ID, err.Error())
+		}
+		return selectedKey, nil
+	}
+
 	selectedKey, err := bifrost.keySelector(ctx, supportedKeys, providerKey, model)
 	if err != nil {
 		return schemas.Key{}, err
 	}
 
 	return selectedKey, nil
-
 }
 
 func WeightedRandomKeySelector(ctx *schemas.BifrostContext, keys []schemas.Key, providerKey schemas.ModelProvider, model string) (schemas.Key, error) {

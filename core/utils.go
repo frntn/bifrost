@@ -480,3 +480,7 @@ func sanitizeSpanName(name string) string {
 func IsCodemodeTool(toolName string) bool {
 	return mcp.IsCodeModeTool(toolName)
 }
+
+func buildSessionKey(providerKey schemas.ModelProvider, sessionID string) string {
+	return "session:" + string(providerKey) + ":" + sessionID
+}
