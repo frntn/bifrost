@@ -3,6 +3,7 @@ package bifrost
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -302,7 +303,7 @@ func TestExecuteRequestWithRetries_RetryableConditions(t *testing.T) {
 // Test calculateBackoff - exponential growth (base calculations without jitter)
 func TestCalculateBackoff_ExponentialGrowth(t *testing.T) {
 	config := createTestConfig(5, 100*time.Millisecond, 5*time.Second)
-	
+
 	// Test the base exponential calculation by checking that results fall within expected ranges
 	// Since we can't easily mock rand.Float64, we'll test the bounds instead
 	testCases := []struct {
@@ -995,4 +996,51 @@ func TestUpdateProvider_ProviderSliceIntegrity(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestRequestWorkerExitsOnContextCancel verifies that requestWorker goroutines
+// clean up when the context passed to Init() is cancelled (without calling Shutdown()).
+func TestRequestWorkerExitsOnContextCancel(t *testing.T) {
+	workerCount := 4
+	runtime.GC()
+	time.Sleep(10 * time.Millisecond)
+	baseline := runtime.NumGoroutine()
+
+	account := NewMockAccount()
+	account.AddProvider(schemas.OpenAI, workerCount, 10)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	_, err := Init(schemas.NewBifrostContext(ctx, schemas.NoDeadline), schemas.BifrostConfig{
+		Account: account,
+		Logger:  NewDefaultLogger(schemas.LogLevelError),
+	})
+	if err != nil {
+		t.Fatalf("Failed to initialize Bifrost: %v", err)
+	}
+
+	runtime.Gosched()
+	time.Sleep(30 * time.Millisecond)
+	afterInit := runtime.NumGoroutine()
+	if afterInit < baseline+workerCount {
+		t.Fatalf("Workers did not start: baseline=%d afterInit=%d (expected +%d)", baseline, afterInit, workerCount)
+	}
+	cancel()
+
+	threshold := baseline + workerCount/2
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		runtime.Gosched()
+		time.Sleep(10 * time.Millisecond)
+		if runtime.NumGoroutine() <= threshold {
+			break
+		}
+	}
+
+	after := runtime.NumGoroutine()
+	if after > threshold {
+		t.Errorf("Goroutine leak after context cancel: baseline=%d afterInit=%d after=%d threshold=%d (workers did not exit)",
+			baseline, afterInit, after, threshold)
+	}
 }

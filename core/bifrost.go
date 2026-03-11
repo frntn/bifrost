@@ -4618,7 +4618,21 @@ func (bifrost *Bifrost) requestWorker(provider schemas.Provider, config *schemas
 		}
 	}()
 
-	for req := range pq.queue {
+	for {
+		var req *ChannelMessage
+		select {
+		case <-bifrost.ctx.Done():
+			bifrost.logger.Debug("worker exiting due to context cancellation for provider %s", provider.GetProviderKey())
+			pq.signalClosing()
+			pq.closeQueue()
+			return
+		case r, ok := <-pq.queue:
+			if !ok {
+				return
+			}
+			req = r
+		}
+
 		_, model, _ := req.BifrostRequest.GetRequestFields()
 
 		var result *schemas.BifrostResponse
