@@ -2509,6 +2509,17 @@
         "tool_sync_interval": {
           "type": "string",
           "description": "Per-client override for tool sync interval (Go duration, e.g. '10m', '1h', 0 = use global, negative = disabled)"
+        },
+        "is_ping_available": {
+          "type": "boolean",
+          "description": "Whether the MCP server supports ping for health checks (default: true)"
+        },
+        "tool_pricing": {
+          "type": "object",
+          "description": "Tool pricing map (tool name to cost per execution)",
+          "additionalProperties": {
+            "type": "number"
+          }
         }
       },
       "required": [
